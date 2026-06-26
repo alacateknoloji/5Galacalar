@@ -1,0 +1,11 @@
+# Runtime dependencies.
+# torch / torchvision are installed separately in the Dockerfile from the CUDA
+# 12.1 wheel index so the build targets the Tesla T4 GPU.
+
+numpy<2.0
+opencv-python-headless
+ultralytics
+easyocr
+# Alternative OCR backend (set OCR_BACKEND="paddle" in src/plate_ocr.py to use):
+# paddleocr
+# paddlepaddle-gpu

@@ -1,0 +1,10 @@
+{
+  "video_id": "testvideo5.mp4",
+  "arac_bilgisi": {
+    "tip": "panelvan",
+    "plaka": "tespit_edilemedi",
+    "renk": "gri",
+    "confidence_score": 0.57
+  },
+  "tespitler": []
+}
