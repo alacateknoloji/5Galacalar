@@ -21,26 +21,22 @@ from src.predict import run_inference
 def _resolve_input_path():
     candidates = [
         os.environ.get("INPUT_PATH"),
-        os.path.join(ROOT_DIR, "testvideo5.mp4"),
-        os.path.join(ROOT_DIR, "data", "input", "testvideo5.mp4"),
-        "/app/data/input/testvideo5.mp4",
+        "/app/data/input/video.mp4",                           # judge VM (dokuman Bolum 6)
+        os.path.join(ROOT_DIR, "video.mp4"),                   # local dev
+        os.path.join(ROOT_DIR, "testvideo5.mp4"),              # local dev (eski isim)
+        os.path.join(ROOT_DIR, "data", "input", "video.mp4"),  # local mirrored
     ]
     for candidate in candidates:
         if candidate and os.path.exists(candidate):
             return candidate
-    return candidates[0] or os.path.join(ROOT_DIR, "testvideo5.mp4")
+    return "/app/data/input/video.mp4"  # fallback to judge path
 
 
 def _resolve_output_path():
-    candidates = [
-        os.environ.get("OUTPUT_PATH"),
-        os.path.join(ROOT_DIR, "results.json"),
-        "/app/data/output/results.json",
-    ]
-    for candidate in candidates:
-        if candidate:
-            return candidate
-    return os.path.join(ROOT_DIR, "results.json")
+    explicit = os.environ.get("OUTPUT_PATH")
+    if explicit:
+        return explicit
+    return "/app/data/output/results.json"  # dokuman Bolum 6: /app/data/output/results.json
 
 
 INPUT_PATH = _resolve_input_path()

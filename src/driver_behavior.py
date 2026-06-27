@@ -4,8 +4,20 @@ Driver behaviour detection (action + EAR merged).
 
 Models:
   - driver_behavior.pt     : action detection (bir_sey_icme, kemer_takili,
-                             mesajlasma, sigara_icme, telefonla_konusma)
-  - driver_behavior_EAR.pt : EAR-based drowsiness / yawning (uykululuk, esneme)
+                             mesajlasma, sigara_icme, telefonla_konusma,
+                             arkaya_bakma, etrafa_bakinma)
+  - driver_behavior_EAR.pt : EAR-based detection (open_mouth→esneme, closed_eye→uykululuk)
+
+Competition label mapping:
+  bir_sey_icme      → su_icme
+  kemer_takili      → absence triggers emniyet_kemeri_ihlali (inversion)
+  mesajlasma        → detected but filtered (no competition equivalent)
+  uykululuk         → detected but filtered by formatter (not in competition schema)
+  sigara_icme       → sigara_icme
+  telefonla_konusma → telefonla_konusma
+  arkaya_bakma      → arkaya_bakma
+  etrafa_bakinma    → etrafa_bakinma
+  esneme            → esneme
 
 load_model() returns {"action": model, "ear": model}; either may be None if
 the weight file is absent — the module degrades gracefully without it.
@@ -34,16 +46,16 @@ PERSON_LABELS = {"person", "insan", "kisi", "human"}
 _DRIVER_ROI_FRACS = (0.50, 0.15, 0.98, 0.92)
 
 VALID_ACTIONS = {
-    "emniyet_kemeri_ihlali", "su_icme",
-    "sigara_icme", "telefonla_konusma",
+    "su_icme", "sigara_icme", "telefonla_konusma",
+    "arkaya_bakma", "etrafa_bakinma",
 }
 
 # Maps model class names → competition label names.
-# kemer_takili (seatbelt detection class) → emniyet_kemeri_ihlali (violation label)
-# bir_sey_icme (drinking anything)        → su_icme (competition equivalent)
+# kemer_takili is handled via inversion in detect(): presence → no violation,
+# absence when driver is visible → emniyet_kemeri_ihlali added directly.
+# bir_sey_icme (drinking anything) → su_icme (competition equivalent)
 # mesajlasma has no competition equivalent; omitted so it gets filtered.
 LABEL_MAP = {
-    "kemer_takili":      "emniyet_kemeri_ihlali",
     "bir_sey_icme":      "su_icme",
     "sigara_icme":       "sigara_icme",
     "telefonla_konusma": "telefonla_konusma",
@@ -53,6 +65,37 @@ LABEL_MAP = {
 
 # Face ROI: right (driver) side, upper portion of car bbox
 _FACE_ROI_FRACS = (0.50, 0.05, 0.98, 0.52)
+
+# Gözler bu kadar saniye kesintisiz kapalı kalırsa → uykululuk
+CLOSED_EYE_THRESHOLD = 2.0
+
+
+class _DrowsinessTracker:
+    """Kapalı göz süresini takip eder; eşik aşılınca uykululuk üretir."""
+
+    def __init__(self, threshold=CLOSED_EYE_THRESHOLD):
+        self.threshold = threshold
+        self._closed_since = None  # ilk kapanma zamanı (saniye)
+
+    def update(self, closed_detected, timestamp):
+        """
+        closed_detected: o karedeki EAR modelinden closed_eye tespiti var mı.
+        timestamp: video zamanı (saniye).
+        Eşik geçildiyse True döner, geçilmediyse False.
+        """
+        if closed_detected:
+            if self._closed_since is None:
+                self._closed_since = timestamp
+            return (timestamp - self._closed_since) >= self.threshold
+        else:
+            self._closed_since = None
+            return False
+
+    def reset(self):
+        self._closed_since = None
+
+
+_drowsiness_tracker = _DrowsinessTracker()
 
 # ── ROI / geometry helpers ────────────────────────────────────────────────────
 
@@ -113,6 +156,10 @@ def _select_driver_person(object_detections, roi=None):
 # ── EAR analysis ──────────────────────────────────────────────────────────────
 
 def _ear_analyze(dets):
+    """Returns (actions, closed_eye_conf).
+    actions: [{"label", "conf"}, ...] for esneme.
+    closed_eye_conf: max confidence of closed_eye detections (0.0 if none).
+    """
     faces = [d for d in dets if d["label"] == "face"]
     features = [d for d in dets if d["label"] != "face"]
     if faces:
@@ -120,13 +167,13 @@ def _ear_analyze(dets):
         features = [d for d in features if _bbox_contains(anchor["bbox"], d["bbox"])]
 
     out = []
-    closed_eyes = [d for d in features if d["label"] == "closed_eye"]
     open_mouths = [d for d in features if d["label"] == "open_mouth"]
-    if closed_eyes:
-        out.append({"label": "uykululuk", "conf": max(d["confidence"] for d in closed_eyes)})
     if open_mouths:
         out.append({"label": "esneme", "conf": max(d["confidence"] for d in open_mouths)})
-    return out
+
+    closed_eyes = [d for d in features if d["label"] in {"closed_eye", "closed_eyes"}]
+    closed_conf = max((d["confidence"] for d in closed_eyes), default=0.0)
+    return out, closed_conf
 
 # ── public API ────────────────────────────────────────────────────────────────
 
@@ -137,11 +184,13 @@ def load_model(models_dir):
     }
 
 
-def detect(models, frame, device, object_detections=None, car_bbox=None):
+def detect(models, frame, device, object_detections=None, car_bbox=None, timestamp=0.0):
     """
-    Detect driver actions and EAR-based states (uykululuk, esneme).
+    Detect driver actions and EAR-based states (esneme, uykululuk).
     `models` must be the dict returned by load_model().
+    `timestamp`: video zamanı (saniye) — uykululuk için zaman takibinde kullanılır.
     Returns [{"label": str, "conf": float}, ...].
+    uykululuk, formatter'da yarışma şemasına göre filtrelenir.
     """
     if not models or frame is None:
         return []
@@ -164,11 +213,18 @@ def detect(models, frame, device, object_detections=None, car_bbox=None):
             if driver_crop is not None and driver_crop.size > 0:
                 result = action_model(driver_crop, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
                 dets = utils.detections_from_result(result, conf_threshold=CONF_THRESHOLD)
+                kemer_takili_detected = False
                 for d in dets:
                     raw = utils.to_ascii(d["label"])
+                    if raw == "kemer_takili":
+                        kemer_takili_detected = True
+                        continue  # kemer takili → ihlal yok, çıktıya ekleme
                     mapped = LABEL_MAP.get(raw, raw)
                     if mapped in VALID_ACTIONS:
                         out.append({"label": mapped, "conf": d["confidence"]})
+                if not kemer_takili_detected:
+                    # Sürücü bölgesi görüldü ama kemer tespit edilemedi → ihlal
+                    out.append({"label": "emniyet_kemeri_ihlali", "conf": 0.80})
         except Exception:
             pass
 
@@ -183,8 +239,14 @@ def detect(models, frame, device, object_detections=None, car_bbox=None):
                 if roi_frame is not None and roi_frame.size > 0:
                     result = ear_model(roi_frame, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
                     dets = utils.detections_from_result(result, conf_threshold=CONF_THRESHOLD)
-                    out.extend(_ear_analyze(dets))
+                    ear_actions, closed_conf = _ear_analyze(dets)
+                    out.extend(ear_actions)
+                    # Uykululuk: gözler CLOSED_EYE_THRESHOLD saniyeden uzun kapalıysa
+                    if _drowsiness_tracker.update(closed_conf > 0.0, timestamp):
+                        out.append({"label": "uykululuk", "conf": closed_conf})
+                else:
+                    _drowsiness_tracker.update(False, timestamp)
         except Exception:
-            pass
+            _drowsiness_tracker.update(False, timestamp)
 
     return out
