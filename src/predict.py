@@ -27,6 +27,7 @@ try:
         vehicle_color,
         plate_ocr,
         driver_behavior,
+        driver_behavior_ear,
         object_detection,
         passenger_detection,
         formatter,
@@ -38,6 +39,7 @@ except ModuleNotFoundError:
     import vehicle_color
     import plate_ocr
     import driver_behavior
+    import driver_behavior_ear
     import object_detection
     import passenger_detection
     import formatter
@@ -95,7 +97,8 @@ def run_inference(video_path, models_dir=None):
     veh_model = vehicle_type.load_model(models_dir)
     color_model = vehicle_color.load_model(models_dir)
     plate_model = plate_ocr.load_model(models_dir)
-    driver_model = driver_behavior.load_model(models_dir)        # not ready yet -> None
+    driver_model = driver_behavior.load_model(models_dir)
+    ear_model    = driver_behavior_ear.load_model(models_dir)
     object_model = object_detection.load_model(models_dir)
     passenger_model = passenger_detection.load_model(models_dir)
 
@@ -168,13 +171,16 @@ def run_inference(video_path, models_dir=None):
         # --- driver / object / passenger ---
         if run_heavy:
             object_detections = object_detection.detect(object_model, frame, device, main_bbox)
-            for a in driver_behavior.detect(driver_model, frame, device, object_detections):
+            for a in driver_behavior.detect(driver_model, frame, device, object_detections, main_bbox):
+                tespitler.append({"zaman_saniye": t, "kategori": "sofor_eylemi",
+                                   "etiket": a["label"], "confidence_score": a["conf"]})
+            for a in driver_behavior_ear.detect(ear_model, frame, device, main_bbox):
                 tespitler.append({"zaman_saniye": t, "kategori": "sofor_eylemi",
                                    "etiket": a["label"], "confidence_score": a["conf"]})
             for o in object_detections:
                 tespitler.append({"zaman_saniye": t, "kategori": "nesneler",
                                   "etiket": o["label"], "confidence_score": o["conf"]})
-            for p in passenger_detection.detect(passenger_model, frame, device, object_detections):
+            for p in passenger_detection.detect(passenger_model, frame, device, object_detections, main_bbox):
                 tespitler.append({"zaman_saniye": t, "kategori": "yolcular",
                                   "etiket": p["label"], "confidence_score": p["conf"]})
 

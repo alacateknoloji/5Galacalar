@@ -2,95 +2,96 @@
 """
 Passenger / seat occupancy module.
 
-This version assumes the model is a person detector. It first finds person
-objects in the frame, then uses ROI regions to classify which seat area they
-occupy. If no person is detected inside a given ROI, that seat returns empty.
+No dedicated passenger model is required. Seat occupancy is determined by
+checking which ROI region (relative to the detected car bbox) each person
+detection from object_detection falls into.
 """
-import os
 
 try:
     from src import utils
 except ModuleNotFoundError:
     import utils
 
-# >>> CONFIG: passenger weight file inside the models dir <<<
-WEIGHT_FILE = "passenger_detection.pt"
-
 VALID_SEATS = {"arka_koltuk_1", "arka_koltuk_2", "on_koltuk"}
 
-# Person detector may output different labels; we only care about person-like detections.
-PERSON_LABELS = {"person", "insan", "kişi", "human"}
+PERSON_LABELS = {"person", "insan", "kisi", "human"}
 
-CONF_THRESHOLD = 0.30
+# Seat ROI boundaries as fractions of the car bounding box
+# on_koltuk (front passenger): left portion of car
+# arka_koltuk_1 / arka_koltuk_2: right back half, split into left/right
+_SEAT_ROIS = {
+    "on_koltuk":     (0.05, 0.20, 0.45, 0.90),
+    "arka_koltuk_1": (0.50, 0.15, 0.72, 0.90),
+    "arka_koltuk_2": (0.72, 0.15, 0.98, 0.90),
+}
 
 
-def _roi_for_seat(frame, seat_name):
-    """Return a rectangular ROI for the requested seat area."""
+def _roi_for_seat(frame, seat_name, car_bbox=None):
+    """Return absolute pixel ROI for the requested seat, optionally within car_bbox."""
     if frame is None:
         return None
     h, w = frame.shape[:2]
 
-    if seat_name == "on_koltuk":
-        x1, y1 = int(w * 0.10), int(h * 0.25)
-        x2, y2 = int(w * 0.45), int(h * 0.85)
-    elif seat_name in {"arka_koltuk_1", "arka_koltuk_2"}:
-        x1, y1 = int(w * 0.50), int(h * 0.20)
-        x2, y2 = int(w * 0.95), int(h * 0.85)
+    if car_bbox is not None:
+        cx1, cy1, cx2, cy2 = car_bbox
+        cw = cx2 - cx1
+        ch = cy2 - cy1
     else:
+        cx1, cy1, cw, ch = 0, 0, w, h
+
+    fracs = _SEAT_ROIS.get(seat_name)
+    if fracs is None:
         return None
 
-    return max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+    fx1, fy1, fx2, fy2 = fracs
+    x1 = max(0, int(cx1 + cw * fx1))
+    y1 = max(0, int(cy1 + ch * fy1))
+    x2 = min(w, int(cx1 + cw * fx2))
+    y2 = min(h, int(cy1 + ch * fy2))
 
-
-def _person_in_roi(frame, roi):
-    """Check whether a person-like object exists inside the given ROI."""
-    if frame is None or roi is None:
-        return False
-    x1, y1, x2, y2 = roi
     if x2 <= x1 or y2 <= y1:
-        return False
-    roi_frame = frame[y1:y2, x1:x2]
-    if roi_frame.size == 0:
-        return False
-    return True
+        return None
+    return x1, y1, x2, y2
 
 
 def load_model(models_dir):
-    return utils.load_yolo(os.path.join(models_dir, WEIGHT_FILE))
+    """No passenger model needed; returns None unconditionally."""
+    return None
 
 
-def detect(model, frame, device, object_detections=None):
-    """Return seat occupancy detections based on person detections inside ROIs."""
-    if model is None or frame is None:
+def detect(model, frame, device, object_detections=None, car_bbox=None):
+    """
+    Determine seat occupancy from person detections within car ROI regions.
+
+    Uses bboxes from object_detections (persons detected by the object detection
+    model). car_bbox anchors the seat ROIs to the detected vehicle region.
+    Each person is assigned to at most one seat (first match wins).
+    """
+    if frame is None or not object_detections:
         return []
     try:
-        dets = []
-        if object_detections is not None:
-            for d in object_detections:
-                raw = utils.to_ascii(d["label"])
-                if raw in PERSON_LABELS and "bbox" in d:
-                    dets.append({"label": raw, "bbox": d["bbox"], "confidence": d.get("conf", 0.0)})
-        else:
-            result = model(frame, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
-            dets = utils.detections_from_result(result, conf_threshold=CONF_THRESHOLD)
+        persons = [
+            d for d in object_detections
+            if utils.to_ascii(d.get("label")) in PERSON_LABELS and "bbox" in d
+        ]
+        if not persons:
+            return []
 
         out = []
+        assigned = set()
         for seat_name in ["on_koltuk", "arka_koltuk_1", "arka_koltuk_2"]:
-            roi = _roi_for_seat(frame, seat_name)
-            if not roi:
+            roi = _roi_for_seat(frame, seat_name, car_bbox)
+            if roi is None:
                 continue
-
-            occupied = False
-            for d in dets:
-                raw = utils.to_ascii(d["label"])
-                if raw in PERSON_LABELS:
-                    x1, y1, x2, y2 = d["bbox"]
-                    if x2 >= roi[0] and x1 <= roi[2] and y2 >= roi[1] and y1 <= roi[3]:
-                        occupied = True
-                        break
-
-            if occupied:
-                out.append({"label": seat_name, "conf": 0.85})
+            rx1, ry1, rx2, ry2 = roi
+            for i, d in enumerate(persons):
+                if i in assigned:
+                    continue
+                px1, py1, px2, py2 = d["bbox"]
+                if px2 >= rx1 and px1 <= rx2 and py2 >= ry1 and py1 <= ry2:
+                    out.append({"label": seat_name, "conf": d.get("conf", 0.85)})
+                    assigned.add(i)
+                    break
 
         return out
     except Exception:

@@ -33,10 +33,9 @@ LABEL_MAP = {
     "minibus": "minibus",
     "panelvan": "panelvan",
     "kamyon": "kamyon",
-    # examples of non-output classes you may still want tracked:
-    # "ambulans": None, "itfaiye": None,
-    # english fallbacks if your model speaks english:
-    # "car": "sedan", "truck": "kamyon", "van": "panelvan", "pickup_truck": "pickup",
+    # tracked for slalom bbox but not a valid output type
+    "ambulans": None,
+    "itfaiye": None,
 }
 
 CONF_THRESHOLD = 0.25

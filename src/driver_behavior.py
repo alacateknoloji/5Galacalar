@@ -19,26 +19,34 @@ except ModuleNotFoundError:
     import utils
 
 
-DEFAULT_ROI_RATIO = 0.35
+PERSON_LABELS = {"person", "insan", "kisi", "human"}
 
-PERSON_LABELS = {"person", "insan", "kişi", "human"}
+# Driver seat occupies the right portion of the car bbox
+# (right-hand side of the car interior image in Turkish vehicles)
+_DRIVER_ROI_FRACS = (0.50, 0.15, 0.98, 0.92)
 
 
-def _get_driver_roi(frame):
-    """Return a ROI on the right side of the front-seat area."""
+def _get_driver_roi(frame, car_bbox=None):
+    """Return the driver seat ROI within the car bounding box."""
     if frame is None:
         return None
     h, w = frame.shape[:2]
-    roi_w = max(80, int(round(w * DEFAULT_ROI_RATIO)))
-    roi_h = max(80, int(round(h * 0.65)))
 
-    front_seat_x1, front_seat_y1 = int(w * 0.10), int(h * 0.25)
-    front_seat_x2, front_seat_y2 = int(w * 0.45), int(h * 0.85)
+    if car_bbox is not None:
+        cx1, cy1, cx2, cy2 = car_bbox
+        cw = cx2 - cx1
+        ch = cy2 - cy1
+    else:
+        cx1, cy1, cw, ch = 0, 0, w, h
 
-    x1 = max(0, int(round(front_seat_x2 + (front_seat_x2 - front_seat_x1) * 0.15)))
-    y1 = max(0, int(round(front_seat_y1 + (front_seat_y2 - front_seat_y1) * 0.15)))
-    x2 = min(w, x1 + roi_w)
-    y2 = min(h, y1 + roi_h)
+    fx1, fy1, fx2, fy2 = _DRIVER_ROI_FRACS
+    x1 = max(0, int(cx1 + cw * fx1))
+    y1 = max(0, int(cy1 + ch * fy1))
+    x2 = min(w, int(cx1 + cw * fx2))
+    y2 = min(h, int(cy1 + ch * fy2))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
     return x1, y1, x2, y2
 
 
@@ -74,21 +82,16 @@ WEIGHT_FILE = "driver_behavior.pt"
 # Valid driver-action labels (kategori is always "sofor_eylemi" downstream).
 # NOTE: "slalom" is emitted by the slalom module from vehicle motion, not here.
 VALID_ACTIONS = {
-    "arkaya_bakma", "esneme", "sigara_icme", "su_icme",
-    "telefonla_konusma", "etrafa_bakinma", "bir_sey_icme", "kemer_takili",
-    "mesajlasma",
+    "bir_sey_icme", "kemer_takili", "mesajlasma",
+    "sigara_icme", "telefonla_konusma",
 }
 
-# >>> CONFIG: map YOUR model's class names -> competition action labels <<<
 LABEL_MAP = {
-    "arkaya_bakma": "arkaya_bakma", "esneme": "esneme", "sigara_icme": "sigara_icme",
-    "su_icme": "su_icme", "telefonla_konusma": "telefonla_konusma",
-    "etrafa_bakinma": "etrafa_bakinma", "bir_sey_icme": "bir_sey_icme",
-    "kemer_takili": "kemer_takili", "mesajlasma": "mesajlasma",
-    # Seat-belt logic: if your model outputs a "belt on" class, map it to None
-    # (no violation). Only emit emniyet_kemeri_ihlali when the belt is absent.
-    # "no_seatbelt": "emniyet_kemeri_ihlali", "seatbelt": None,
-    # "phone": "telefonla_konusma", "smoking": "sigara_icme", "yawning": "esneme",
+    "bir_sey_icme":       "bir_sey_icme",
+    "kemer_takili":       "kemer_takili",
+    "mesajlasma":         "mesajlasma",
+    "sigara_icme":        "sigara_icme",
+    "telefonla_konusma":  "telefonla_konusma",
 }
 
 CONF_THRESHOLD = 0.30
@@ -98,18 +101,17 @@ def load_model(models_dir):
     return utils.load_yolo(os.path.join(models_dir, WEIGHT_FILE))
 
 
-def detect(model, frame, device, object_detections=None):
+def detect(model, frame, device, object_detections=None, car_bbox=None):
     """
     Detect driver actions on a frame.
-    If object_detections are available, select the rightmost person and
-    crop around that person; otherwise use the default right-side ROI.
-    Returns [{"label": <valid action>, "conf": float}, ...]. Empty while the
-    model is unavailable.
+    ROI is computed relative to car_bbox when provided.
+    If object_detections are available, the rightmost person within the driver
+    ROI is selected and cropped; otherwise the ROI crop is used directly.
     """
     if model is None or frame is None:
         return []
     try:
-        roi = _get_driver_roi(frame)
+        roi = _get_driver_roi(frame, car_bbox)
         driver_crop = None
 
         if object_detections is not None:

@@ -21,7 +21,7 @@ VEHICLE_TYPES = {"sedan", "suv", "hatchback", "pickup", "minibus", "panelvan", "
 COLORS = {"beyaz", "siyah", "gri", "kirmizi", "mavi", "sari", "yesil", "turuncu", "kahverengi"}
 DRIVER_ACTIONS = {"arkaya_bakma", "esneme", "sigara_icme", "su_icme",
                   "telefonla_konusma", "slalom", "etrafa_bakinma",
-                  "bir_sey_icme", "kemer_takili", "mesajlasma"}
+                  "bir_sey_icme", "kemer_takili", "mesajlasma", "uykululuk"}
 
 OBJECTS = {"teknocan", "bilgisayar"}
 PASSENGERS = {"arka_koltuk_1", "arka_koltuk_2", "on_koltuk"}

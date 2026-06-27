@@ -19,9 +19,9 @@ VALID_OBJECTS = {"teknocan", "bilgisayar", "insan"}
 
 # >>> CONFIG: map YOUR model's class names -> competition object labels <<<
 LABEL_MAP = {
-    "teknocan": "teknocan", "bilgisayar": "bilgisayar", "insan": "insan",
-    # english fallbacks:
-    # "laptop": "bilgisayar", "computer": "bilgisayar", "can": "teknocan",
+    "teknocan": "teknocan",
+    "laptop":   "bilgisayar",
+    "insan":    "insan",
 }
 
 CONF_THRESHOLD = 0.30
@@ -48,6 +48,12 @@ def detect(model, frame, device, bbox=None):
         roi_frame = _get_detection_frame(frame, bbox)
         if roi_frame is None or roi_frame.size == 0:
             return []
+        # Track offset so bboxes are reported in full-frame coordinates
+        offset_x, offset_y = 0, 0
+        if bbox is not None:
+            offset_x = max(0, int(round(bbox[0])))
+            offset_y = max(0, int(round(bbox[1])))
+
         result = model(roi_frame, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
         dets = utils.detections_from_result(result, conf_threshold=CONF_THRESHOLD)
         out = []
@@ -55,7 +61,9 @@ def detect(model, frame, device, bbox=None):
             raw = utils.to_ascii(d["label"])
             mapped = LABEL_MAP.get(raw, raw)
             if mapped in VALID_OBJECTS:
-                out.append({"label": mapped, "conf": d["confidence"]})
+                x1, y1, x2, y2 = d["bbox"]
+                full_bbox = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
+                out.append({"label": mapped, "conf": d["confidence"], "bbox": full_bbox})
         return out
     except Exception:
         return []
