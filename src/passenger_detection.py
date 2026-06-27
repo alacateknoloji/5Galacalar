@@ -14,7 +14,7 @@ except ModuleNotFoundError:
 
 VALID_SEATS = {"arka_koltuk_1", "arka_koltuk_2", "on_koltuk"}
 
-PERSON_LABELS = {"person", "insan", "kisi", "human"}
+PERSON_LABELS = {"insan"}
 
 # Seat ROI boundaries as fractions of the car bounding box
 # on_koltuk (front passenger): left portion of car

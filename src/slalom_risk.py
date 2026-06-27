@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os
-import re
+"""Vehicle slalom and speed risk detection module."""
+
 import glob
 import json
 import math
+import os
+import re
 
 try:
     from src import utils, vehicle_type
@@ -13,26 +15,25 @@ except ModuleNotFoundError:
     import vehicle_type
 
 # ── Kullanıcı Ayarları ─────────────────────────────────────────────────
-MODEL_PATH = None   # None → resolve_model_path() ile otomatik bulunur
-SOURCE     = None   # Sıralı görüntü klasörü veya video dosyası
+MODEL_PATH = None
+SOURCE = None
+VIDEO_FPS = 30.0
+CONF_THRESHOLD = 0.25
+LABEL_MAP = {}
 
-VIDEO_FPS            = 30.0
-CONF_THRESHOLD       = 0.25
-LABEL_MAP            = {}
-
-MAX_HISTORY_SECONDS  = 2
+MAX_HISTORY_SECONDS = 2
 MIN_LATERAL_MOVEMENT = 30    # Anlamlı yatay hareket eşiği (piksel)
-ZIGZAG_THRESHOLD     = 2     # Slalom için gereken min yön değişimi
-MAX_TRACK_DISTANCE   = 100   # Eşleştirme için max merkez mesafesi (piksel)
+ZIGZAG_THRESHOLD = 2         # Slalom için gereken min yön değişimi
+MAX_TRACK_DISTANCE = 100     # Eşleştirme için max merkez mesafesi (piksel)
 
-PIXELS_PER_METER     = 10.0  # Kamerana göre kalibre et!
-SPEED_LIMIT_KMH      = 50.0
-SPEED_SMOOTH_FRAMES  = 10
+PIXELS_PER_METER = 10.0      # Kamerana göre kalibre et!
+SPEED_LIMIT_KMH = 50.0
+SPEED_SMOOTH_FRAMES = 10
 
 SHOW_VIDEO = True
 
 VEHICLE_LABELS = ["ambulans", "hatchback", "itfaiye", "kamyon", "minibus",
-                   "panelvan", "pickup", "sedan", "suv"]
+                  "panelvan", "pickup", "sedan", "suv"]
 
 
 # ── Yardımcılar ────────────────────────────────────────────────────────
@@ -40,12 +41,12 @@ def resolve_model_path(models_dir=None):
     candidates = [models_dir, os.environ.get("MODELS_DIR"),
                   os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)), "models"),
                   "/app/models"]
-    for d in candidates:
-        if not d or not os.path.isdir(d):
+    for candidate in candidates:
+        if not candidate or not os.path.isdir(candidate):
             continue
-        for p in utils._candidate_weight_paths(os.path.join(d, vehicle_type.WEIGHT_FILE)):
-            if os.path.isfile(p):
-                return p
+        for path in utils._candidate_weight_paths(os.path.join(candidate, vehicle_type.WEIGHT_FILE)):
+            if os.path.isfile(path):
+                return path
     return None
 
 
@@ -54,7 +55,7 @@ def get_center(bbox):
     return (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
 
-def _dist(c1, c2):
+def center_distance(c1, c2):
     return math.hypot(c1[0] - c2[0], c1[1] - c2[1])
 
 
@@ -68,56 +69,74 @@ class VehicleTracker:
         self.tracks = {}
         self.next_id = 1
 
-    def _history_frames(self, fps):
+    def _max_history_frames(self, fps):
         return max(2, int(round(self.max_history_seconds * max(fps, 1))))
 
+    def _create_track(self, det, frame_index):
+        tid = self.next_id
+        self.next_id += 1
+        self.tracks[tid] = {
+            "track_id": tid,
+            "label": det["label"],
+            "bbox": det["bbox"],
+            "confidence": det["confidence"],
+            "center": det["center"],
+            "last_frame": frame_index,
+            "history": [(frame_index, det["center"][0], det["center"][1])],
+        }
+        return tid
+
     def update(self, detections, frame_index, fps):
-        dets = [{"label": d["label"], "bbox": d["bbox"],
-                 "confidence": float(d.get("confidence", 0)),
-                 "center": get_center(d["bbox"])}
-                for d in detections if d.get("label") in self.vehicle_labels]
+        dets = [
+            {"label": d["label"], "bbox": d["bbox"],
+             "confidence": float(d.get("confidence", 0.0)),
+             "center": get_center(d["bbox"])}
+            for d in detections if d.get("label") in self.vehicle_labels
+        ]
 
-        # Greedy en-yakın eşleştirme
-        pairs = sorted(
-            [(d_i, tid, _dist(d["center"], self.tracks[tid]["center"]))
-             for d_i, d in enumerate(dets)
-             for tid in self.tracks
-             if _dist(d["center"], self.tracks[tid]["center"]) <= self.max_distance],
-            key=lambda x: x[2])
-        matched_d, matched_t, assignment = set(), set(), {}
-        for d_i, tid, _ in pairs:
-            if d_i not in matched_d and tid not in matched_t:
-                matched_d.add(d_i); matched_t.add(tid); assignment[d_i] = tid
+        pairs = []
+        for di, det in enumerate(dets):
+            for tid in self.tracks:
+                dist = center_distance(det["center"], self.tracks[tid]["center"])
+                if dist <= self.max_distance:
+                    pairs.append((dist, di, tid))
+        pairs.sort(key=lambda p: p[0])
 
-        updated = []
-        for d_i, d in enumerate(dets):
-            if d_i in assignment:
-                t = self.tracks[assignment[d_i]]
-                t.update({"label": d["label"], "bbox": d["bbox"],
-                           "confidence": d["confidence"], "center": d["center"],
-                           "last_frame": frame_index})
-                t["history"].append((frame_index, *d["center"]))
-                updated.append(assignment[d_i])
+        assignment, matched_dets, matched_tracks = {}, set(), set()
+        for _, di, tid in pairs:
+            if di in matched_dets or tid in matched_tracks:
+                continue
+            assignment[di] = tid
+            matched_dets.add(di)
+            matched_tracks.add(tid)
+
+        updated_ids = []
+        for di, det in enumerate(dets):
+            if di in assignment:
+                tid = assignment[di]
+                track = self.tracks[tid]
+                track.update({"label": det["label"], "bbox": det["bbox"],
+                              "confidence": det["confidence"], "center": det["center"],
+                              "last_frame": frame_index})
+                track["history"].append((frame_index, det["center"][0], det["center"][1]))
             else:
-                tid = self.next_id; self.next_id += 1
-                self.tracks[tid] = {"track_id": tid, "label": d["label"], "bbox": d["bbox"],
-                                     "confidence": d["confidence"], "center": d["center"],
-                                     "last_frame": frame_index,
-                                     "history": [(frame_index, *d["center"])]}
-                updated.append(tid)
+                tid = self._create_track(det, frame_index)
+            updated_ids.append(tid)
 
-        # Geçmişi kırp + eski track'leri temizle
-        limit = self._history_frames(fps)
-        min_frame = frame_index - limit
-        stale = []
-        for tid, t in self.tracks.items():
-            t["history"] = [h for h in t["history"] if h[0] >= min_frame]
-            if frame_index - t["last_frame"] > limit:
-                stale.append(tid)
+        self._trim_history(frame_index, fps)
+        self._prune_tracks(frame_index, fps)
+        return [self.tracks[tid] for tid in updated_ids]
+
+    def _trim_history(self, frame_index, fps):
+        min_frame = frame_index - self._max_history_frames(fps)
+        for track in self.tracks.values():
+            track["history"] = [h for h in track["history"] if h[0] >= min_frame]
+
+    def _prune_tracks(self, frame_index, fps):
+        limit = self._max_history_frames(fps)
+        stale = [tid for tid, track in self.tracks.items() if frame_index - track["last_frame"] > limit]
         for tid in stale:
             del self.tracks[tid]
-
-        return [self.tracks[tid] for tid in updated]
 
 
 # ── Slalom Analizi ─────────────────────────────────────────────────────
@@ -126,63 +145,78 @@ class SlalomRiskAnalyzer:
         self.min_lateral = min_lateral
         self.zigzag_threshold = zigzag_threshold
 
-    def _direction_changes(self, xs):
+    def _count_direction_changes(self, xs):
         if len(xs) < 2:
             return 0
-        dirs, last_ext, cur_dir = [], xs[0], 0
+        sig_dirs, last_extreme, move_dir = [], xs[0], 0
         for x in xs[1:]:
-            diff = x - last_ext
-            if cur_dir == 0:
+            diff = x - last_extreme
+            if move_dir == 0:
                 if abs(diff) >= self.min_lateral:
-                    cur_dir = 1 if diff > 0 else -1
-                    dirs.append(cur_dir); last_ext = x
-            else:
-                same = (diff > 0 and cur_dir > 0) or (diff < 0 and cur_dir < 0)
-                if same:
-                    last_ext = x
-                elif abs(diff) >= self.min_lateral:
-                    cur_dir = 1 if diff > 0 else -1
-                    dirs.append(cur_dir); last_ext = x
-        return sum(1 for i in range(1, len(dirs)) if dirs[i] != dirs[i - 1])
+                    move_dir = 1 if diff > 0 else -1
+                    sig_dirs.append(move_dir)
+                    last_extreme = x
+            elif (diff > 0 and move_dir > 0) or (diff < 0 and move_dir < 0):
+                last_extreme = x
+            elif abs(diff) >= self.min_lateral:
+                move_dir = 1 if diff > 0 else -1
+                sig_dirs.append(move_dir)
+                last_extreme = x
+        return sum(1 for a, b in zip(sig_dirs, sig_dirs[1:]) if a != b)
 
     def analyze(self, track):
-        count  = self._direction_changes([h[1] for h in track["history"]])
-        slalom = count >= self.zigzag_threshold
+        zigzag_count = self._count_direction_changes([h[1] for h in track["history"]])
+        slalom = zigzag_count >= self.zigzag_threshold
         confidence, reason = 0.0, ""
         if slalom:
-            confidence = round(min(0.99, track["confidence"] * (0.90 + 0.03 * (count - self.zigzag_threshold))), 2)
+            extra = zigzag_count - self.zigzag_threshold
+            confidence = round(min(0.99, track["confidence"] * (0.90 + 0.03 * extra)), 2)
             reason = "Araç kısa süre içinde sağ-sol yön değişimi yaptı."
-        return {"slalom": slalom, "zigzag_count": count, "confidence": confidence, "reason": reason}
+        return {"slalom": slalom, "zigzag_count": zigzag_count, "confidence": confidence, "reason": reason}
 
 
 # ── Hız Tahmini ────────────────────────────────────────────────────────
-def estimate_speed(track, fps):
-    recent = track["history"][-SPEED_SMOOTH_FRAMES:]
-    if len(recent) < 2:
-        return 0.0
-    total_px = sum(math.hypot(recent[i][1] - recent[i-1][1], recent[i][2] - recent[i-1][2])
-                   for i in range(1, len(recent)))
-    elapsed = recent[-1][0] - recent[0][0]
-    return round(total_px / elapsed * fps / PIXELS_PER_METER * 3.6, 1) if elapsed else 0.0
+class SpeedEstimator:
+    def estimate(self, track, fps):
+        history = track["history"]
+        if len(history) < 2:
+            return 0.0
+        recent = history[-SPEED_SMOOTH_FRAMES:]
+        if len(recent) < 2:
+            return 0.0
+        total_px = sum(math.hypot(recent[i][1] - recent[i - 1][1], recent[i][2] - recent[i - 1][2])
+                       for i in range(1, len(recent)))
+        frames_elapsed = recent[-1][0] - recent[0][0]
+        if frames_elapsed == 0:
+            return 0.0
+        return round((total_px / frames_elapsed) * fps / PIXELS_PER_METER * 3.6, 1)
 
 
 # ── Ana Sistem ─────────────────────────────────────────────────────────
 class SlalomDetectionSystem:
     def __init__(self, max_distance=MAX_TRACK_DISTANCE, min_lateral=MIN_LATERAL_MOVEMENT,
                  zigzag_threshold=ZIGZAG_THRESHOLD, vehicle_labels=None):
-        self.tracker  = VehicleTracker(max_distance=max_distance, vehicle_labels=vehicle_labels)
+        self.tracker = VehicleTracker(max_distance=max_distance, vehicle_labels=vehicle_labels)
         self.analyzer = SlalomRiskAnalyzer(min_lateral=min_lateral, zigzag_threshold=zigzag_threshold)
+        self.speed_estimator = SpeedEstimator()
 
     def process_frame(self, detections, frame_index, fps):
-        all_tracks, slalom_detections = [], []
-        for t in self.tracker.update(detections, frame_index, fps):
-            res      = self.analyzer.analyze(t)
-            speed    = estimate_speed(t, fps)
-            speeding = speed > SPEED_LIMIT_KMH
-            entry    = {"track_id": t["track_id"], "label": t["label"],
-                        "bbox": [int(round(v)) for v in t["bbox"]],
-                        "center": [int(round(v)) for v in t["center"]],
-                        "speed_kmh": speed, "speeding": speeding, "slalom": res["slalom"]}
+        tracks = self.tracker.update(detections, frame_index, fps)
+        slalom_detections, all_tracks = [], []
+        for track in tracks:
+            res = self.analyzer.analyze(track)
+            speed_kmh = self.speed_estimator.estimate(track, fps)
+            speeding = speed_kmh > SPEED_LIMIT_KMH
+            entry = {
+                "track_id": track["track_id"],
+                "label": track["label"],
+                "bbox": [int(round(v)) for v in track["bbox"]],
+                "center": [int(round(track["center"][0])), int(round(track["center"][1]))],
+                "speed_kmh": speed_kmh,
+                "speeding": speeding,
+                "slalom": res["slalom"],
+                "confidence": round(track["confidence"], 2),
+            }
             all_tracks.append(entry)
             if res["slalom"]:
                 slalom_detections.append({**entry, "reason": res["reason"], "confidence": res["confidence"]})
@@ -205,14 +239,14 @@ def reset_system():
 # ── YOLO Çıkarım Katmanı ───────────────────────────────────────────────
 def detections_from_result(result, label_map=None):
     boxes = getattr(result, "boxes", None)
-    if not boxes or len(boxes) == 0:
+    if boxes is None or len(boxes) == 0:
         return []
     names = result.names
-    dets  = []
+    dets = []
     for i in range(len(boxes)):
         cls_id = int(boxes.cls[i].item())
-        raw    = names[cls_id] if isinstance(names, (list, tuple)) else names.get(cls_id, str(cls_id))
-        label  = (label_map or {}).get(raw, raw)
+        raw = names[cls_id] if isinstance(names, (list, tuple)) else names.get(cls_id, str(cls_id))
+        label = label_map.get(raw, raw) if label_map else raw
         x1, y1, x2, y2 = (float(v) for v in boxes.xyxy[i].tolist())
         dets.append({"label": label, "bbox": [x1, y1, x2, y2], "confidence": float(boxes.conf[i].item())})
     return dets
@@ -223,8 +257,10 @@ def _natural_key(s):
 
 
 def _collect_sources(source):
+    if not source:
+        return [], None
     if os.path.isdir(source):
-        exts  = ("jpg", "jpeg", "png", "bmp", "webp")
+        exts = ("jpg", "jpeg", "png", "bmp", "webp")
         files = []
         for e in exts:
             files += glob.glob(os.path.join(source, f"*.{e}")) + glob.glob(os.path.join(source, f"*.{e.upper()}"))
@@ -239,36 +275,51 @@ def _draw_annotations(frame, out):
         return frame
     for t in out.get("all_tracks", []):
         x1, y1, x2, y2 = t["bbox"]
-        alert = t.get("slalom") or t.get("speeding")
+        alert = t.get("slalom", False) or t.get("speeding", False)
         color = (0, 0, 255) if alert else (0, 200, 0)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(frame, f"{t['label']} #{t['track_id']} | {t['speed_kmh']} km/h",
                     (x1, max(y1 - 22, 0)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
-        warnings = (["SLALOM!"] if t.get("slalom") else []) + \
-                   ([f"HIZ ASIMI! (>{SPEED_LIMIT_KMH:.0f}km/h)"] if t.get("speeding") else [])
+        warnings = []
+        if t.get("slalom"):
+            warnings.append("SLALOM!")
+        if t.get("speeding"):
+            warnings.append(f"HIZ ASIMI! (>{SPEED_LIMIT_KMH:.0f}km/h)")
         if warnings:
             cv2.putText(frame, " | ".join(warnings), (x1, max(y1 - 5, 0)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
     return frame
 
 
+def _print_frame_info(out, frame_index):
+    for t in out.get("all_tracks", []):
+        flags = []
+        if t.get("slalom"):
+            flags.append("SLALOM")
+        if t.get("speeding"):
+            flags.append(f"HIZ ASIMI (>{SPEED_LIMIT_KMH:.0f}km/h)")
+        flag_str = "  *** " + " | ".join(flags) + " ***" if flags else ""
+        print(f"[KARE {frame_index}] #{t['track_id']} {t['label']:12s} {t['speed_kmh']:>6.1f} km/h{flag_str}")
+
+
 def run_inference(model_path=None, source=SOURCE, fps=VIDEO_FPS, conf=CONF_THRESHOLD, label_map=None):
     try:
         from ultralytics import YOLO
-    except ImportError:
-        raise SystemExit("Bu adim icin 'ultralytics' gerekli.\nKur: pip install ultralytics")
+    except ImportError as exc:
+        raise SystemExit("Bu adim icin 'ultralytics' gerekli.\nKur: pip install ultralytics") from exc
 
     cv2_ok = False
     if SHOW_VIDEO:
         try:
-            import cv2; cv2_ok = True
+            import cv2
+            cv2_ok = True
         except ImportError:
             print("UYARI: OpenCV bulunamadi; gorsel pencere acilmayacak.")
 
     if model_path is None:
         model_path = resolve_model_path()
     if not model_path or not os.path.exists(model_path):
-        raise SystemExit(f"Model bulunamadi: {model_path}")
+        raise SystemExit(f"Model bulunamadi: {model_path}\nMODELS_DIR veya MODEL_PATH'i kontrol et.")
 
     model = YOLO(model_path)
     reset_system()
@@ -278,23 +329,15 @@ def run_inference(model_path=None, source=SOURCE, fps=VIDEO_FPS, conf=CONF_THRES
     if kind == "images" and len(items) == 1:
         print("UYARI: Tek goruntu - slalom zamansal bir davranistir, sirali kareler kullan.")
 
-    outputs      = []
-    source_iter  = items if kind == "images" else model(source, stream=True, conf=conf, verbose=False)
-
+    outputs = []
+    source_iter = items if kind == "images" else model(source, stream=True, conf=conf, verbose=False)
     for frame_index, item in enumerate(source_iter):
         result = model(item, conf=conf, verbose=False)[0] if kind == "images" else item
-        out    = process_frame(detections_from_result(result, label_map), frame_index, fps)
+        out = process_frame(detections_from_result(result, label_map), frame_index, fps)
         outputs.append(out)
-
-        for t in out.get("all_tracks", []):
-            flags    = (["SLALOM"] if t.get("slalom") else []) + \
-                       ([f"HIZ ASIMI (>{SPEED_LIMIT_KMH:.0f}km/h)"] if t.get("speeding") else [])
-            flag_str = "  *** " + " | ".join(flags) + " ***" if flags else ""
-            print(f"[KARE {frame_index}] #{t['track_id']} {t['label']:12s} {t['speed_kmh']:>6.1f} km/h{flag_str}")
-
+        _print_frame_info(out, frame_index)
         if out["slalom_detections"]:
             print(json.dumps(out["slalom_detections"], ensure_ascii=False))
-
         if cv2_ok and SHOW_VIDEO:
             import cv2
             cv2.imshow("Slalom + Hiz Takibi", _draw_annotations(result.orig_img.copy(), out))
@@ -304,17 +347,18 @@ def run_inference(model_path=None, source=SOURCE, fps=VIDEO_FPS, conf=CONF_THRES
     if cv2_ok and SHOW_VIDEO:
         import cv2
         cv2.destroyAllWindows()
-
     return outputs
 
 
 # ── Çalıştırma ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    outputs  = run_inference(MODEL_PATH, SOURCE, VIDEO_FPS, CONF_THRESHOLD, LABEL_MAP or None)
-    slalom_n = sum(1 for o in outputs if o["slalom_detections"])
-    speed_n  = sum(1 for o in outputs if any(t["speeding"] for t in o.get("all_tracks", [])))
-    print(f"\n[OZET] {len(outputs)} kare islendi.")
-    print(f"  Slalom   : {slalom_n} karede tespit edildi.")
-    print(f"  Hiz asimi: {speed_n} karede (esik: {SPEED_LIMIT_KMH:.0f} km/h).")
+    outputs = run_inference(model_path=MODEL_PATH, source=SOURCE, fps=VIDEO_FPS,
+                            conf=CONF_THRESHOLD, label_map=LABEL_MAP or None)
+    slalom_hits = sum(1 for o in outputs if o["slalom_detections"])
+    speed_hits = sum(1 for o in outputs if any(t["speeding"] for t in o.get("all_tracks", [])))
+    print(f"\n[OZET] Toplam {len(outputs)} kare islendi.")
+    print(f"  Slalom   : {slalom_hits} karede tespit edildi.")
+    print(f"  Hiz asimi: {speed_hits} karede tespit edildi (esik: {SPEED_LIMIT_KMH:.0f} km/h).")
+    print(f"  Not: PIXELS_PER_METER={PIXELS_PER_METER} — kamerana gore kalibre et!")
     if not outputs:
         print("Hic kare islenemedi. SOURCE yolunu kontrol et.")

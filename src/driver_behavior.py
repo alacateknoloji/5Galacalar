@@ -34,14 +34,17 @@ PERSON_LABELS = {"person", "insan", "kisi", "human"}
 _DRIVER_ROI_FRACS = (0.50, 0.15, 0.98, 0.92)
 
 VALID_ACTIONS = {
-    "bir_sey_icme", "kemer_takili", "mesajlasma",
+    "emniyet_kemeri_ihlali", "su_icme",
     "sigara_icme", "telefonla_konusma",
 }
 
+# Maps model class names → competition label names.
+# kemer_takili (seatbelt detection class) → emniyet_kemeri_ihlali (violation label)
+# bir_sey_icme (drinking anything)        → su_icme (competition equivalent)
+# mesajlasma has no competition equivalent; omitted so it gets filtered.
 LABEL_MAP = {
-    "bir_sey_icme":      "bir_sey_icme",
-    "kemer_takili":      "kemer_takili",
-    "mesajlasma":        "mesajlasma",
+    "kemer_takili":      "emniyet_kemeri_ihlali",
+    "bir_sey_icme":      "su_icme",
     "sigara_icme":       "sigara_icme",
     "telefonla_konusma": "telefonla_konusma",
 }

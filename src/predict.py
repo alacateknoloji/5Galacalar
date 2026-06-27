@@ -123,7 +123,7 @@ def run_inference(video_path, models_dir=None):
         except Exception:
             dets = []
 
-        # --- slalom (temporal) ---
+        # --- slalom + hız (temporal) ---
         try:
             sres = slalom_system.process_frame(dets, frame_idx, fps)
             for sd in sres["slalom_detections"]:
@@ -136,6 +136,15 @@ def run_inference(video_path, models_dir=None):
                 if "speed_kmh" in sd:
                     detection["speed_kmh"] = sd["speed_kmh"]
                 tespitler.append(detection)
+            for tr in sres["all_tracks"]:
+                if tr.get("speeding"):
+                    tespitler.append({
+                        "zaman_saniye": t,
+                        "kategori": "sofor_eylemi",
+                        "etiket": "hiz_asimi",
+                        "confidence_score": tr.get("confidence", 0.5),
+                        "speed_kmh": tr["speed_kmh"],
+                    })
         except Exception:
             pass
 
@@ -193,7 +202,7 @@ def run_inference(video_path, models_dir=None):
         "arac_confidence": arac_conf,
         "tespitler": tespitler,
     }
-    result = formatter.format_results(raw, video_id)
+    result = formatter.format_output(raw, video_id)
     utils.log.info("done: %d frames analysed, %d detections kept",
                    analyzed, len(result["tespitler"]))
     return result
