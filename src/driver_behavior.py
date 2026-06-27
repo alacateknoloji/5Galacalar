@@ -21,6 +21,8 @@ except ModuleNotFoundError:
 
 DEFAULT_ROI_RATIO = 0.35
 
+PERSON_LABELS = {"person", "insan", "kişi", "human"}
+
 
 def _get_driver_roi(frame):
     """Return a ROI on the right side of the front-seat area."""
@@ -38,6 +40,33 @@ def _get_driver_roi(frame):
     x2 = min(w, x1 + roi_w)
     y2 = min(h, y1 + roi_h)
     return x1, y1, x2, y2
+
+
+def _bbox_center_x(bbox):
+    x1, _, x2, _ = bbox
+    return (x1 + x2) / 2.0
+
+
+def _bbox_intersects_roi(bbox, roi):
+    x1, y1, x2, y2 = bbox
+    rx1, ry1, rx2, ry2 = roi
+    return x2 >= rx1 and x1 <= rx2 and y2 >= ry1 and y1 <= ry2
+
+
+def _select_driver_person(object_detections, roi=None):
+    """Select the rightmost person detection, optionally restricted to a driver ROI."""
+    if not object_detections:
+        return None
+    candidates = []
+    for d in object_detections:
+        raw = utils.to_ascii(d.get("label"))
+        if raw in PERSON_LABELS and "bbox" in d:
+            bbox = d["bbox"]
+            if roi is None or _bbox_intersects_roi(bbox, roi):
+                candidates.append(d)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: _bbox_center_x(d["bbox"]))
 
 # >>> CONFIG: driver-behaviour weight file inside the models dir <<<
 WEIGHT_FILE = "driver_behavior.pt"
@@ -69,9 +98,11 @@ def load_model(models_dir):
     return utils.load_yolo(os.path.join(models_dir, WEIGHT_FILE))
 
 
-def detect(model, frame, device):
+def detect(model, frame, device, object_detections=None):
     """
     Detect driver actions on a frame.
+    If object_detections are available, select the rightmost person and
+    crop around that person; otherwise use the default right-side ROI.
     Returns [{"label": <valid action>, "conf": float}, ...]. Empty while the
     model is unavailable.
     """
@@ -79,13 +110,23 @@ def detect(model, frame, device):
         return []
     try:
         roi = _get_driver_roi(frame)
-        if roi is None:
+        driver_crop = None
+
+        if object_detections is not None:
+            selected = _select_driver_person(object_detections, roi=roi)
+            if selected is not None:
+                driver_crop = utils.crop_bbox(frame, selected["bbox"], pad=0.10)
+
+        if driver_crop is None:
+            if roi is None:
+                return []
+            x1, y1, x2, y2 = roi
+            driver_crop = frame[y1:y2, x1:x2]
+
+        if driver_crop is None or driver_crop.size == 0:
             return []
-        x1, y1, x2, y2 = roi
-        roi_frame = frame[y1:y2, x1:x2]
-        if roi_frame.size == 0:
-            return []
-        result = model(roi_frame, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
+
+        result = model(driver_crop, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
         dets = utils.detections_from_result(result, conf_threshold=CONF_THRESHOLD)
         out = []
         for d in dets:

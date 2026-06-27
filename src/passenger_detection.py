@@ -59,15 +59,22 @@ def load_model(models_dir):
     return utils.load_yolo(os.path.join(models_dir, WEIGHT_FILE))
 
 
-def detect(model, frame, device):
+def detect(model, frame, device, object_detections=None):
     """Return seat occupancy detections based on person detections inside ROIs."""
     if model is None or frame is None:
         return []
     try:
-        result = model(frame, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
-        dets = utils.detections_from_result(result, conf_threshold=CONF_THRESHOLD)
-        out = []
+        dets = []
+        if object_detections is not None:
+            for d in object_detections:
+                raw = utils.to_ascii(d["label"])
+                if raw in PERSON_LABELS and "bbox" in d:
+                    dets.append({"label": raw, "bbox": d["bbox"], "confidence": d.get("conf", 0.0)})
+        else:
+            result = model(frame, conf=CONF_THRESHOLD, device=device, verbose=False)[0]
+            dets = utils.detections_from_result(result, conf_threshold=CONF_THRESHOLD)
 
+        out = []
         for seat_name in ["on_koltuk", "arka_koltuk_1", "arka_koltuk_2"]:
             roi = _roi_for_seat(frame, seat_name)
             if not roi:

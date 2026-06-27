@@ -167,13 +167,14 @@ def run_inference(video_path, models_dir=None):
 
         # --- driver / object / passenger ---
         if run_heavy:
-            for a in driver_behavior.detect(driver_model, frame, device):
+            object_detections = object_detection.detect(object_model, frame, device, main_bbox)
+            for a in driver_behavior.detect(driver_model, frame, device, object_detections):
                 tespitler.append({"zaman_saniye": t, "kategori": "sofor_eylemi",
                                    "etiket": a["label"], "confidence_score": a["conf"]})
-            for o in object_detection.detect(object_model, frame, device, main_bbox):
+            for o in object_detections:
                 tespitler.append({"zaman_saniye": t, "kategori": "nesneler",
                                   "etiket": o["label"], "confidence_score": o["conf"]})
-            for p in passenger_detection.detect(passenger_model, frame, device):
+            for p in passenger_detection.detect(passenger_model, frame, device, object_detections):
                 tespitler.append({"zaman_saniye": t, "kategori": "yolcular",
                                   "etiket": p["label"], "confidence_score": p["conf"]})
 
